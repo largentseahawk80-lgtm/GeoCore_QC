@@ -1,0 +1,9 @@
+{
+  "name": "GeoLiner QC Field Log",
+  "description": "A smart, location-aware field logging tool for geosynthetic liner installation with Gemini-powered image editing and mapping.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
