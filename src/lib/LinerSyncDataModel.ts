@@ -2,6 +2,7 @@
 // LINERSYNC SUPER APP
 // CHUNK 5A — MASTER QC DATA MODEL
 // =====================================================
+// Raw QC data fields only. No personal/company preset values.
 
 export type RecordStatus = 'Draft' | 'Open' | 'Complete' | 'Pass' | 'Fail' | 'Rejected' | 'Accepted' | 'Locked'
 export type PassFailTrial = '' | 'Pass' | 'Fail' | 'Trial'
@@ -27,7 +28,7 @@ export type ProjectProfile = {
 }
 
 export const DEFAULT_PROJECT_PROFILE: ProjectProfile = {
-  company: 'Southwest Liner Systems Inc.',
+  company: '',
   projectName: '',
   siteName: '',
   pondCellArea: '',
