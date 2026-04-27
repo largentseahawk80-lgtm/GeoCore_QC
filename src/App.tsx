@@ -1,309 +1,371 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CloudBackupPanel } from './components/CloudBackupPanel'
 import { schedulePush } from './services/syncService'
+import {
+  RECORD_TYPES,
+  calculateAirTestResult,
+  createAirTestRecord,
+  createDailyAsBuiltRecord,
+  createDestructiveTestRecord,
+  createPanelPlacementRecord,
+  createRollInventoryRecord,
+  createVacuumTestRecord,
+  createWedgeWeldingRecord,
+  createWeldTestRecord,
+} from './lib/LinerSyncDataModel'
+import {
+  ACTIVE_QC_FORMS,
+  QC_FORM_REGISTRY,
+  type QCField,
+  type QCFormDefinition,
+  validateRequiredFields,
+} from './lib/QCFormRegistry'
+import {
+  applyAutoFillToRecord,
+  loadAutoFillMemory,
+  projectProfileFromMemory,
+  rememberFromRecord,
+  rememberProjectProfile,
+  resetAutoFillMemory,
+} from './lib/AutoFillMemory'
 
-type Screen = 'home' | 'newProject' | 'projectHome' | 'chooser' | 'module' | 'detail' | 'ar'
-type ModuleKey = 'repairs' | 'rolls' | 'panels' | 'seams'
-type Project = { name: string; site: string; date: string; notes: string }
-type RecordMap = Record<string, string>
-type DB = { repairs: RecordMap[]; rolls: RecordMap[]; panels: RecordMap[]; seams: RecordMap[] }
+type Screen = 'home' | 'qcChooser' | 'qcForm' | 'qcList' | 'qcDetail' | 'ar'
+type RecordMap = Record<string, any>
+type QCRecords = Record<string, RecordMap[]>
 
-const PROJECT_KEY = 'geocore_project_v5'
-const DB_KEY = 'geocore_db_v5'
-const emptyProject: Project = { name: '', site: '', date: '', notes: '' }
-const emptyDb: DB = { repairs: [], rolls: [], panels: [], seams: [] }
+const QC_RECORDS_KEY = 'linersync_qc_records_v5d'
 
-const moduleConfig: Record<ModuleKey, { title: string; action: string; firstField: string; visible: string[]; fields: string[] }> = {
-  repairs: {
-    title: 'REPAIR',
-    action: 'ADD REPAIR',
-    firstField: 'Repair#',
-    visible: ['Repair#', 'Panel', 'Type', 'Status', 'Date'],
-    fields: ['Repair#', 'Panel', 'Type', 'Location', 'Reason', 'Welder', 'Status', 'Date', 'Comments'],
-  },
-  rolls: {
-    title: 'ROLL',
-    action: 'ADD ROLL',
-    firstField: 'Roll#',
-    visible: ['Roll#', 'Lot#', 'Manufacturer', 'Status', 'Date'],
-    fields: ['Roll#', 'Lot#', 'Manufacturer', 'Width', 'Length', 'Status', 'Date', 'Comments'],
-  },
-  panels: {
-    title: 'PANEL',
-    action: 'START / STOP PANEL',
-    firstField: 'Panel#',
-    visible: ['Panel#', 'Zone', 'Orientation', 'Auto Length', 'Status'],
-    fields: ['Panel#', 'Zone', 'Orientation', 'Width', 'Start GPS', 'End GPS', 'Auto Length', 'Length Override', 'Offset Side', 'Status', 'Date', 'Notes'],
-  },
-  seams: {
-    title: 'SEAM',
-    action: 'ADD SEAM',
-    firstField: 'Seam#',
-    visible: ['Seam#', 'Panel1', 'Panel2', 'Status', 'Date'],
-    fields: ['Seam#', 'Panel1', 'Panel2', 'Weld Type', 'Length', 'Welder', 'Status', 'Date', 'Comments'],
-  },
-}
-
-function today() {
+function currentDateInput() {
   const d = new Date()
-  return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-function toRad(d: number) { return d * Math.PI / 180 }
-function haversineFeet(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000
-  const dLat = toRad(lat2 - lat1)
-  const dLon = toRad(lon2 - lon1)
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-  return R * c * 3.28084
+function currentTimeInput() {
+  const d = new Date()
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
-function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const y = Math.sin(toRad(lon2-lon1)) * Math.cos(toRad(lat2))
-  const x = Math.cos(toRad(lat1))*Math.sin(toRad(lat2)) - Math.sin(toRad(lat1))*Math.cos(toRad(lat2))*Math.cos(toRad(lon2-lon1))
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+
+function createEmptyRecords(): QCRecords {
+  return ACTIVE_QC_FORMS.reduce((acc, form) => {
+    acc[form.recordType] = []
+    return acc
+  }, {} as QCRecords)
 }
-function orientationFromBearing(b: number) {
-  if ((b >= 45 && b < 135) || (b >= 225 && b < 315)) return 'E-W'
-  return 'N-S'
+
+function createRecordForType(recordType: string): RecordMap {
+  const profile = projectProfileFromMemory(loadAutoFillMemory())
+  let record: RecordMap
+
+  switch (recordType) {
+    case RECORD_TYPES.ROLL_INVENTORY:
+      record = createRollInventoryRecord(profile)
+      break
+    case RECORD_TYPES.PANEL_PLACEMENT:
+      record = createPanelPlacementRecord(profile)
+      record.placementDate = currentDateInput()
+      break
+    case RECORD_TYPES.WEDGE_WELDING:
+      record = createWedgeWeldingRecord(profile)
+      record.weldDate = currentDateInput()
+      record.weldTime = currentTimeInput()
+      break
+    case RECORD_TYPES.WELD_TEST:
+      record = createWeldTestRecord(profile)
+      record.testDate = currentDateInput()
+      record.testTime = currentTimeInput()
+      break
+    case RECORD_TYPES.AIR_TEST:
+      record = createAirTestRecord(profile)
+      record.startingTime = currentTimeInput()
+      break
+    case RECORD_TYPES.DESTRUCTIVE_TEST:
+      record = createDestructiveTestRecord(profile)
+      record.destructiveDate = currentDateInput()
+      break
+    case RECORD_TYPES.VACUUM_TEST:
+      record = createVacuumTestRecord(profile)
+      record.dateRepaired = currentDateInput()
+      break
+    case RECORD_TYPES.DAILY_AS_BUILT:
+      record = createDailyAsBuiltRecord(profile)
+      record.reportDate = currentDateInput()
+      break
+    case RECORD_TYPES.PROJECT_PROFILE:
+    default:
+      record = {
+        id: crypto.randomUUID(),
+        recordType: RECORD_TYPES.PROJECT_PROFILE,
+        ...profile,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      break
+  }
+
+  return applyAutoFillToRecord(recordType, record)
+}
+
+function calculateDerivedFields(recordType: string, record: RecordMap): RecordMap {
+  const next = { ...record }
+
+  if (recordType === RECORD_TYPES.ROLL_INVENTORY) {
+    const width = Number(next.rollWidth)
+    const length = Number(next.rollLength)
+    if (!Number.isNaN(width) && !Number.isNaN(length) && width > 0 && length > 0) {
+      next.rollSquareFootage = String(width * length)
+    }
+  }
+
+  if (recordType === RECORD_TYPES.PANEL_PLACEMENT) {
+    const width = Number(next.panelWidth)
+    const length = Number(next.panelLength)
+    if (!Number.isNaN(width) && !Number.isNaN(length) && width > 0 && length > 0) {
+      next.panelSquareFootage = String(width * length)
+    }
+  }
+
+  if (recordType === RECORD_TYPES.AIR_TEST) {
+    return calculateAirTestResult(next as any)
+  }
+
+  return next
+}
+
+async function getGpsPoint() {
+  return new Promise<{ lat: number; lng: number; accuracyFt: number | null }>((resolve) => {
+    if (!navigator.geolocation) {
+      resolve({ lat: 0, lng: 0, accuracyFt: null })
+      return
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracyFt: pos.coords.accuracy ? Math.round(pos.coords.accuracy * 3.28084) : null,
+      }),
+      () => resolve({ lat: 0, lng: 0, accuracyFt: null }),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+    )
+  })
+}
+
+function formatSummaryValue(value: any) {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '—'
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  return value || '—'
 }
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
-  const [project, setProject] = useState<Project>(emptyProject)
-  const [draftProject, setDraftProject] = useState<Project>(emptyProject)
-  const [db, setDb] = useState<DB>(emptyDb)
-  const [helpOpen, setHelpOpen] = useState(false)
-  const [status, setStatus] = useState('Ready')
-  const [activeModule, setActiveModule] = useState<ModuleKey>('repairs')
-  const [recordDraft, setRecordDraft] = useState<RecordMap>({})
+  const [activeRecordType, setActiveRecordType] = useState<string>(RECORD_TYPES.PROJECT_PROFILE)
+  const [records, setRecords] = useState<QCRecords>(createEmptyRecords)
+  const [draft, setDraft] = useState<RecordMap>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
-  const [heard, setHeard] = useState('Nothing yet')
+  const [status, setStatus] = useState('Ready')
+  const [helpOpen, setHelpOpen] = useState(false)
   const [arMode, setArMode] = useState<'panel' | 'seam' | 'repair'>('panel')
+
+  const activeForm = QC_FORM_REGISTRY[activeRecordType] || ACTIVE_QC_FORMS[0]
+  const activeRows = records[activeRecordType] || []
+  const detailRecord = activeRows.find((row) => row.id === detailId) || null
+  const totalSaved = useMemo(() => Object.values(records).reduce((sum, rows) => sum + rows.length, 0), [records])
+  const latestProject = records[RECORD_TYPES.PROJECT_PROFILE]?.[0]
 
   useEffect(() => {
     try {
-      const savedProject = localStorage.getItem(PROJECT_KEY)
-      if (savedProject) {
-        const parsed = JSON.parse(savedProject) as Project
-        if (parsed?.name) setProject(parsed)
+      const saved = localStorage.getItem(QC_RECORDS_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved) as QCRecords
+        setRecords({ ...createEmptyRecords(), ...parsed })
       }
-    } catch {}
-    try {
-      const savedDb = localStorage.getItem(DB_KEY)
-      if (savedDb) {
-        const parsed = JSON.parse(savedDb) as DB
-        setDb({
-          repairs: parsed.repairs || [],
-          rolls: parsed.rolls || [],
-          panels: parsed.panels || [],
-          seams: parsed.seams || [],
-        })
-      }
-    } catch {}
+    } catch {
+      setRecords(createEmptyRecords())
+    }
   }, [])
 
   useEffect(() => {
-    localStorage.setItem(PROJECT_KEY, JSON.stringify(project))
-  }, [project])
-
-  useEffect(() => {
-    localStorage.setItem(DB_KEY, JSON.stringify(db))
+    localStorage.setItem(QC_RECORDS_KEY, JSON.stringify(records))
     schedulePush()
-  }, [db])
+  }, [records])
 
-  const hasProject = Boolean(project.name.trim())
-  const cfg = moduleConfig[activeModule]
-  const totalSaved = useMemo(() => db.repairs.length + db.rolls.length + db.panels.length + db.seams.length, [db])
-  const activeRows = db[activeModule]
-  const detailRecord = activeRows.find((row) => row.id === detailId) || null
-  const recentPanels = db.panels.slice(0, 3)
-  const recentSeams = db.seams.slice(0, 3)
-  const recentRepairs = db.repairs.slice(0, 3)
+  function openFormChooser() {
+    setScreen('qcChooser')
+    setStatus('QC form list open')
+  }
 
-  function openCurrentProject() {
-    if (!hasProject) {
-      setStatus('No current project saved yet')
-      return
-    }
-    setScreen('projectHome')
-    setStatus('Current project opened')
-  }
-  function openNewProject() {
-    setDraftProject(emptyProject)
-    setScreen('newProject')
-    setStatus('New project form ready')
-  }
-  function saveProject() {
-    if (!draftProject.name.trim()) {
-      setStatus('Project name is required')
-      return
-    }
-    setProject(draftProject)
-    setScreen('projectHome')
-    setStatus('Project saved locally')
-  }
-  function nextId(prefix: string, module: ModuleKey, field: string) {
-    let max = 0
-    db[module].forEach((row) => {
-      const value = row[field] || ''
-      const match = value.match(/(\d+)/)
-      if (match) max = Math.max(max, Number(match[1]))
-    })
-    return `${prefix}${String(max + 1).padStart(3, '0')}`
-  }
-  function getDefaultDraft(module: ModuleKey): RecordMap {
-    if (module === 'repairs') return { 'Repair#': nextId('R-', module, 'Repair#'), Date: today(), Type: 'Patch', Status: 'Open' }
-    if (module === 'rolls') return { 'Roll#': nextId('RL-', module, 'Roll#'), Date: today(), Status: 'Available' }
-    if (module === 'panels') return { 'Panel#': nextId('P-', module, 'Panel#'), Date: today(), Width: '23', Status: 'Open', 'Offset Side': 'Right', Zone: 'East Slope', Orientation: 'N-S' }
-    return { 'Seam#': nextId('S-', module, 'Seam#'), Date: today(), 'Weld Type': 'Fusion', Status: 'Open' }
-  }
-  function openModule(module: ModuleKey) {
-    setActiveModule(module)
-    setScreen('module')
-    setRecordDraft({})
-    setStatus(`${moduleConfig[module].title} module open`)
-  }
-  function startNewRecord() {
+  function openForm(form: QCFormDefinition) {
+    setActiveRecordType(form.recordType)
+    setDraft(createRecordForType(form.recordType))
     setEditingId(null)
-    setRecordDraft(getDefaultDraft(activeModule))
-    setHeard('Nothing yet')
-    setStatus(`${cfg.title} form ready`)
+    setScreen('qcForm')
+    setStatus(`${form.title} ready`)
   }
-  function openEdit(row: RecordMap) {
-    setEditingId(row.id || null)
-    setRecordDraft({ ...row })
-    setStatus(`Editing ${cfg.title}`)
+
+  function openList(form: QCFormDefinition) {
+    setActiveRecordType(form.recordType)
+    setDetailId(null)
+    setScreen('qcList')
+    setStatus(`${form.title} logs open`)
   }
-  function fieldInput(field: string, value: string) {
-    setRecordDraft((prev) => {
-      const next = { ...prev, [field]: value }
-      if (activeModule === 'panels') return recalcPanel(next)
-      return next
-    })
+
+  function updateDraft(fieldKey: string, value: any) {
+    setDraft((prev) => calculateDerivedFields(activeRecordType, { ...prev, [fieldKey]: value }))
   }
-  function recalcPanel(next: RecordMap) {
-    const s = (next['Start GPS'] || '').split(',').map(x => x.trim())
-    const e = (next['End GPS'] || '').split(',').map(x => x.trim())
-    if (s.length >= 2 && e.length >= 2 && s[0] && s[1] && e[0] && e[1]) {
-      const lat1 = parseFloat(s[0]), lon1 = parseFloat(s[1]), lat2 = parseFloat(e[0]), lon2 = parseFloat(e[1])
-      if (!Number.isNaN(lat1) && !Number.isNaN(lon1) && !Number.isNaN(lat2) && !Number.isNaN(lon2)) {
-        next['Auto Length'] = haversineFeet(lat1, lon1, lat2, lon2).toFixed(1)
-        next['Orientation'] = orientationFromBearing(bearingDeg(lat1, lon1, lat2, lon2))
+
+  async function captureGps(field: QCField) {
+    const gps = await getGpsPoint()
+    const point = `${gps.lat.toFixed(6)}, ${gps.lng.toFixed(6)}`
+
+    setDraft((prev) => {
+      const next = {
+        ...prev,
+        gpsLatitude: gps.lat,
+        gpsLongitude: gps.lng,
+        gpsAccuracyFt: gps.accuracyFt,
+        [field.key]: point,
+        updatedAt: new Date().toISOString(),
       }
-    }
-    return next
-  }
-  async function getLiveGps() {
-    return new Promise<RecordMap>((resolve) => {
-      if (!navigator.geolocation) {
-        resolve({ lat: '32.000000', lng: '-106.000000' })
-        return
-      }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({ lat: pos.coords.latitude.toFixed(6), lng: pos.coords.longitude.toFixed(6) }),
-        () => resolve({ lat: '32.000000', lng: '-106.000000' }),
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      )
+      return calculateDerivedFields(activeRecordType, next)
     })
+
+    setStatus(`GPS captured: ${point}`)
   }
-  async function captureStart() {
-    const gps = await getLiveGps()
-    fieldInput('Start GPS', `${gps.lat}, ${gps.lng}`)
-    setStatus('Panel start GPS captured')
-  }
-  async function captureEnd() {
-    const gps = await getLiveGps()
-    fieldInput('End GPS', `${gps.lat}, ${gps.lng}`)
-    setStatus('Panel end GPS captured')
-  }
-  function parseVoiceText(text: string) {
-    const said = text.toLowerCase().trim()
-    setHeard(said || 'Nothing yet')
-    if (!said) return
-    if (said.includes('east slope') || said === 'east') fieldInput('Zone', 'East Slope')
-    else if (said.includes('west slope') || said === 'west') fieldInput('Zone', 'West Slope')
-    else if (said.includes('north slope')) fieldInput('Zone', 'North Slope')
-    else if (said.includes('south slope')) fieldInput('Zone', 'South Slope')
-    else if (said.includes('floor')) fieldInput('Zone', 'Floor')
-    if (said.includes('north south') || said.includes('n s')) fieldInput('Orientation', 'N-S')
-    if (said.includes('east west') || said.includes('e w')) fieldInput('Orientation', 'E-W')
-    const width = said.match(/width\s+(\d+(\.\d+)?)/i)
-    if (width) fieldInput('Width', width[1])
-    const panel = said.match(/panel\s+([a-z0-9\-]+)/i)
-    if (panel && !['start','stop','save'].includes(panel[1].toLowerCase())) fieldInput('Panel#', panel[1].toUpperCase())
-  }
-  function runVoice() {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) {
-      setStatus('Voice recognition not available on this browser')
-      return
-    }
-    setHeard('Listening...')
-    const recg = new SR()
-    recg.lang = 'en-US'
-    recg.interimResults = false
-    recg.maxAlternatives = 1
-    recg.onresult = async (event: any) => {
-      const said = (event.results?.[0]?.[0]?.transcript || '').toLowerCase().trim()
-      parseVoiceText(said)
-      if (said.includes('start panel')) await captureStart()
-      if (said.includes('stop panel')) await captureEnd()
-      if (said.includes('save panel')) saveRecord()
-    }
-    recg.onerror = () => setHeard('Voice recognition error')
-    recg.start()
-  }
+
   function saveRecord() {
-    const firstField = cfg.firstField
-    if (!(recordDraft[firstField] || '').trim()) {
-      setStatus(`${firstField} is required`)
+    const finalRecord = calculateDerivedFields(activeRecordType, {
+      ...draft,
+      id: editingId || draft.id || crypto.randomUUID(),
+      recordType: activeRecordType,
+      updatedAt: new Date().toISOString(),
+      _savedAt: new Date().toISOString(),
+    })
+
+    const validation = validateRequiredFields(activeRecordType, finalRecord)
+    if (!validation.ok) {
+      setStatus(`Missing required: ${validation.missing.join(', ')}`)
       return
     }
-    if (activeModule === 'panels') {
-      if (!(recordDraft['Start GPS'] || '').trim() || !(recordDraft['End GPS'] || '').trim()) {
-        setStatus('Panel needs Start GPS and End GPS')
-        return
-      }
+
+    if (activeRecordType === RECORD_TYPES.PROJECT_PROFILE) {
+      rememberProjectProfile(finalRecord)
+    } else {
+      rememberFromRecord(activeRecordType, finalRecord)
     }
-    const finalRecord: RecordMap = {
-      ...recordDraft,
-      id: editingId || crypto.randomUUID(),
-      _savedAt: new Date().toISOString(),
-    }
-    if (activeModule === 'panels') {
-      finalRecord._panelLogic = JSON.stringify({
-        zone: finalRecord['Zone'],
-        orientation: finalRecord['Orientation'],
-        widthFeet: finalRecord['Width'],
-        autoLengthFeet: finalRecord['Auto Length'],
-        lengthOverride: finalRecord['Length Override'],
-        offsetSide: finalRecord['Offset Side'],
-        startGps: finalRecord['Start GPS'],
-        endGps: finalRecord['End GPS'],
-        polygonMode: 'line_plus_width_strip_placeholder',
-      })
-    }
-    setDb((prev) => {
-      const rows = [...prev[activeModule]]
+
+    setRecords((prev) => {
+      const rows = [...(prev[activeRecordType] || [])]
       const existingIndex = rows.findIndex((row) => row.id === finalRecord.id)
       if (existingIndex >= 0) rows[existingIndex] = finalRecord
       else rows.unshift(finalRecord)
-      return { ...prev, [activeModule]: rows }
+      return { ...prev, [activeRecordType]: rows }
     })
+
     setEditingId(null)
-    setRecordDraft({})
-    setStatus(`${cfg.title} saved`)
+    setDraft(createRecordForType(activeRecordType))
+    setStatus(`${activeForm.title} saved and memory updated`)
   }
+
+  function editRecord(row: RecordMap) {
+    setEditingId(row.id)
+    setDraft({ ...row })
+    setScreen('qcForm')
+    setStatus(`Editing ${activeForm.title}`)
+  }
+
   function deleteRecord(id: string) {
-    setDb((prev) => ({
+    setRecords((prev) => ({
       ...prev,
-      [activeModule]: prev[activeModule].filter((row) => row.id !== id),
+      [activeRecordType]: (prev[activeRecordType] || []).filter((row) => row.id !== id),
     }))
     setDetailId(null)
-    setScreen('module')
-    setStatus(`${cfg.title} deleted`)
+    setScreen('qcList')
+    setStatus(`${activeForm.title} deleted`)
+  }
+
+  function clearMemory() {
+    resetAutoFillMemory()
+    setStatus('Auto-fill memory reset')
+  }
+
+  function renderField(field: QCField) {
+    const value = draft[field.key]
+
+    if (field.type === 'textarea') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}{field.required ? ' *' : ''}</span>
+          <textarea value={value || ''} onChange={(e) => updateDraft(field.key, e.target.value)} placeholder={field.placeholder || field.label} />
+        </label>
+      )
+    }
+
+    if (field.type === 'select') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}{field.required ? ' *' : ''}</span>
+          <select value={value || ''} onChange={(e) => updateDraft(field.key, e.target.value)}>
+            <option value="">Select</option>
+            {(field.options || []).map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </label>
+      )
+    }
+
+    if (field.type === 'checkbox') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}</span>
+          <button className={`btn ${value ? 'primary' : ''}`} onClick={() => updateDraft(field.key, !value)}>
+            {value ? 'YES' : 'NO'}
+          </button>
+        </label>
+      )
+    }
+
+    if (field.type === 'gps') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}</span>
+          <div className="grid-two">
+            <input value={value || ''} onChange={(e) => updateDraft(field.key, e.target.value)} placeholder="GPS will fill here" />
+            <button className="btn" onClick={() => captureGps(field)}>CAPTURE GPS</button>
+          </div>
+        </label>
+      )
+    }
+
+    if (field.type === 'photo') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}</span>
+          <input type="file" accept="image/*" capture="environment" onChange={(e) => updateDraft(field.key, e.target.files?.[0]?.name || '')} />
+          {value ? <small>{String(value)}</small> : null}
+        </label>
+      )
+    }
+
+    if (field.type === 'readonly') {
+      return (
+        <label className="field" key={field.key}>
+          <span>{field.label}</span>
+          <input value={formatSummaryValue(value)} readOnly />
+        </label>
+      )
+    }
+
+    return (
+      <label className="field" key={field.key}>
+        <span>{field.label}{field.required ? ' *' : ''}</span>
+        <input
+          type={field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : field.type === 'time' ? 'time' : 'text'}
+          value={value || ''}
+          onChange={(e) => updateDraft(field.key, e.target.value)}
+          placeholder={field.placeholder || field.label}
+        />
+      </label>
+    )
   }
 
   return (
@@ -312,26 +374,21 @@ export default function App() {
         {screen === 'home' && (
           <section className="panel hero">
             <div className="brand-row">
-              <div className="logo"><span>GC</span></div>
+              <div className="logo"><span>LS</span></div>
               <div>
-                <h1 className="title">GeoCore QC</h1>
-                <p className="subtitle">Chunk 5 - AR field overlay foundation</p>
+                <h1 className="title">LinerSync QC</h1>
+                <p className="subtitle">Chunk 5D - live QC forms connected</p>
               </div>
             </div>
             <div className="accent-line" />
             <div className="stack">
-              <button className="btn big" onClick={openCurrentProject}>OPEN CURRENT PROJECT</button>
-              <button className="btn big" onClick={openNewProject}>NEW PROJECT</button>
-              <button className="btn big primary" onClick={() => hasProject ? setScreen('chooser') : setStatus('Create or open a project first')}>
-                TAP TO CAPTURE
-              </button>
-              <button className="btn big" onClick={() => hasProject ? setScreen('ar') : setStatus('Create or open a project first')}>
-                OPEN AR VIEW
-              </button>
+              <button className="btn big primary" onClick={openFormChooser}>TAP TO CAPTURE QC FORM</button>
+              <button className="btn big" onClick={() => openList(ACTIVE_QC_FORMS[0])}>LAST LOGS</button>
+              <button className="btn big" onClick={() => setScreen('ar')}>OPEN AR VIEW</button>
             </div>
             <div className="stats">
-              <div className="stat-card"><strong>Project</strong><span>{project.name || 'None'}</span></div>
-              <div className="stat-card"><strong>Total Saved</strong><span>{String(totalSaved)}</span></div>
+              <div className="stat-card"><strong>Project</strong><span>{latestProject?.projectName || 'Set in Project Setup'}</span></div>
+              <div className="stat-card"><strong>Total QC Logs</strong><span>{String(totalSaved)}</span></div>
             </div>
             <div className="stack" style={{ marginTop: 14 }}>
               <CloudBackupPanel />
@@ -339,243 +396,118 @@ export default function App() {
           </section>
         )}
 
-        {screen === 'newProject' && (
+        {screen === 'qcChooser' && (
           <section className="panel">
             <button className="back" onClick={() => setScreen('home')}>← BACK</button>
-            <h2 className="section-title">NEW PROJECT</h2>
+            <h2 className="section-title">QC FORMS</h2>
+            <p className="subtitle">Every form below uses the locked Chunk 5A/5B/5C data fields.</p>
             <div className="form-stack">
-              <label className="field"><span>Project Name</span><input value={draftProject.name} onChange={(e) => setDraftProject((p) => ({ ...p, name: e.target.value }))} placeholder="Enter project name" /></label>
-              <label className="field"><span>Site / Location</span><input value={draftProject.site} onChange={(e) => setDraftProject((p) => ({ ...p, site: e.target.value }))} placeholder="Enter site or location" /></label>
-              <label className="field"><span>Date</span><input value={draftProject.date} onChange={(e) => setDraftProject((p) => ({ ...p, date: e.target.value }))} placeholder="MM/DD/YYYY" /></label>
-              <label className="field"><span>Notes</span><textarea value={draftProject.notes} onChange={(e) => setDraftProject((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional notes" /></label>
-              <button className="btn primary" onClick={saveProject}>SAVE PROJECT</button>
+              {ACTIVE_QC_FORMS.map((form) => (
+                <div className="detail-box" key={form.recordType}>
+                  <strong>{form.title}</strong>
+                  <div className="record-meta">{(records[form.recordType] || []).length} saved</div>
+                  <div className="grid-two" style={{ marginTop: 8 }}>
+                    <button className="btn primary" onClick={() => openForm(form)}>{form.actionLabel}</button>
+                    <button className="btn" onClick={() => openList(form)}>VIEW LOGS</button>
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
         )}
 
-        {screen === 'projectHome' && (
+        {screen === 'qcForm' && (
           <section className="panel">
-            <button className="back" onClick={() => setScreen('home')}>← BACK</button>
+            <button className="back" onClick={() => setScreen('qcChooser')}>← BACK</button>
             <div className="project-head">
               <div>
-                <h2 className="section-title">{project.name || 'PROJECT'}</h2>
-                <p className="subtitle">{project.site || 'No site set'}{project.date ? ` - ${project.date}` : ''}</p>
+                <h2 className="section-title">{activeForm.title}</h2>
+                <p className="subtitle">Auto-fill memory is active until you change the field.</p>
               </div>
-              <div className="pill">Current Project</div>
+              <div className="pill">{editingId ? 'Edit' : 'New'}</div>
             </div>
-            <div className="stack">
-              <button className="btn big primary" onClick={() => setScreen('chooser')}>TAP TO CAPTURE</button>
-              <button className="btn big" onClick={() => setScreen('ar')}>OPEN AR VIEW</button>
-              <CloudBackupPanel />
+
+            <div className="form-stack">
+              {activeForm.fields.map(renderField)}
+              <div className="grid-two">
+                <button className="btn primary" onClick={saveRecord}>{editingId ? 'UPDATE RECORD' : 'SAVE RECORD'}</button>
+                <button className="btn" onClick={() => setDraft(createRecordForType(activeRecordType))}>CLEAR FORM</button>
+              </div>
+              <button className="btn" onClick={clearMemory}>RESET AUTO-FILL MEMORY</button>
             </div>
           </section>
         )}
 
-        {screen === 'chooser' && (
+        {screen === 'qcList' && (
           <section className="panel">
-            <button className="back" onClick={() => setScreen(hasProject ? 'projectHome' : 'home')}>← BACK</button>
-            <h2 className="section-title">TAP TO CAPTURE</h2>
+            <button className="back" onClick={() => setScreen('qcChooser')}>← BACK</button>
+            <div className="project-head">
+              <div>
+                <h2 className="section-title">{activeForm.title} Logs</h2>
+                <p className="subtitle">Last saved field records.</p>
+              </div>
+              <div className="pill">{activeRows.length} saved</div>
+            </div>
+            <button className="btn primary" onClick={() => openForm(activeForm)}>ADD NEW</button>
+            <div className="list" style={{ marginTop: 12 }}>
+              {activeRows.length === 0 && <div className="empty-box">No logs yet for this form.</div>}
+              {activeRows.map((row) => (
+                <button className="record-card" key={row.id} onClick={() => { setDetailId(row.id); setScreen('qcDetail') }}>
+                  <strong>{formatSummaryValue(row[activeForm.primaryField])}</strong>
+                  <div className="record-meta">
+                    {activeForm.summaryFields.filter((f) => f !== activeForm.primaryField).map((field) => (
+                      <span key={field}>{field}: {formatSummaryValue(row[field])}</span>
+                    ))}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {screen === 'qcDetail' && detailRecord && (
+          <section className="panel">
+            <button className="back" onClick={() => setScreen('qcList')}>← BACK</button>
+            <h2 className="section-title">{activeForm.title} Detail</h2>
             <div className="form-stack">
-              <button className="btn primary" onClick={() => openModule('repairs')}>REPAIR</button>
-              <button className="btn" onClick={() => openModule('rolls')}>ROLL</button>
-              <button className="btn" onClick={() => openModule('panels')}>PANEL</button>
-              <button className="btn" onClick={() => openModule('seams')}>SEAM</button>
+              {Object.entries(detailRecord).filter(([key]) => key !== 'id').map(([key, value]) => (
+                <div className="detail-box" key={key}>
+                  <strong>{key}</strong>
+                  <div>{formatSummaryValue(value)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="grid-two" style={{ marginTop: 12 }}>
+              <button className="btn" onClick={() => editRecord(detailRecord)}>EDIT</button>
+              <button className="btn danger" onClick={() => deleteRecord(detailRecord.id)}>DELETE</button>
             </div>
           </section>
         )}
 
         {screen === 'ar' && (
           <section className="panel arPanel">
-            <button className="back" onClick={() => setScreen(hasProject ? 'projectHome' : 'home')}>← BACK</button>
+            <button className="back" onClick={() => setScreen('home')}>← BACK</button>
             <div className="project-head">
               <div>
                 <h2 className="section-title">AR FIELD VIEW</h2>
-                <p className="subtitle">{project.name || 'No project open'}</p>
+                <p className="subtitle">AR stays parked behind QC logging until forms are stable.</p>
               </div>
               <div className="pill">Foundation</div>
             </div>
-
             <div className="grid-two">
               <button className={`btn ${arMode === 'panel' ? 'primary' : ''}`} onClick={() => setArMode('panel')}>PANEL</button>
               <button className={`btn ${arMode === 'seam' ? 'primary' : ''}`} onClick={() => setArMode('seam')}>SEAM</button>
             </div>
             <button className={`btn ${arMode === 'repair' ? 'primary' : ''}`} onClick={() => setArMode('repair')}>REPAIR</button>
-
             <div className="cameraMock">
               <div className="cameraHeader">CAMERA / AR OVERLAY PLACEHOLDER</div>
-
-              {arMode === 'panel' && (
-                <>
-                  <div className="arLine centerLine"></div>
-                  <div className="arLine edgeLeft"></div>
-                  <div className="arLine edgeRight"></div>
-                  <div className="arMarker startMarker">START</div>
-                  <div className="arMarker endMarker">END</div>
-                </>
-              )}
-
-              {arMode === 'seam' && (
-                <>
-                  <div className="arLine seamLine"></div>
-                  <div className="arTag seamTag">SEAM PATH</div>
-                </>
-              )}
-
-              {arMode === 'repair' && (
-                <>
-                  <div className="repairDot repair1"></div>
-                  <div className="repairDot repair2"></div>
-                  <div className="arTag repairTag">REPAIR MARKER MODE</div>
-                </>
-              )}
+              {arMode === 'panel' && <><div className="arLine centerLine"></div><div className="arLine edgeLeft"></div><div className="arLine edgeRight"></div></>}
+              {arMode === 'seam' && <><div className="arLine seamLine"></div><div className="arTag seamTag">SEAM PATH</div></>}
+              {arMode === 'repair' && <><div className="repairDot repair1"></div><div className="repairDot repair2"></div><div className="arTag repairTag">REPAIR MARKER MODE</div></>}
             </div>
-
             <div className="detail-box">
-              <strong>Overlay logic</strong>
-              {arMode === 'panel' && <div>Shows saved panel center line, width edges, and start/end markers from panel records.</div>}
-              {arMode === 'seam' && <div>Shows seam path between saved adjacent panels. Auto seam generation comes next.</div>}
-              {arMode === 'repair' && <div>Shows repair marker placement mode for bead or patch points.</div>}
-            </div>
-
-            <div className="list">
-              {arMode === 'panel' && recentPanels.map((row) => (
-                <div className="detail-box" key={row.id}>
-                  <strong>{row['Panel#'] || 'Panel'}</strong>
-                  <div>Zone: {row['Zone'] || '—'} | Orientation: {row['Orientation'] || '—'} | Length: {row['Auto Length'] || '—'} ft</div>
-                </div>
-              ))}
-              {arMode === 'seam' && recentSeams.map((row) => (
-                <div className="detail-box" key={row.id}>
-                  <strong>{row['Seam#'] || 'Seam'}</strong>
-                  <div>{row['Panel1'] || '—'} to {row['Panel2'] || '—'} | Length: {row['Length'] || '—'} | Status: {row['Status'] || '—'}</div>
-                </div>
-              ))}
-              {arMode === 'repair' && recentRepairs.map((row) => (
-                <div className="detail-box" key={row.id}>
-                  <strong>{row['Repair#'] || 'Repair'}</strong>
-                  <div>{row['Panel'] || '—'} | {row['Type'] || '—'} | {row['Location'] || '—'}</div>
-                </div>
-              ))}
-              {((arMode === 'panel' && recentPanels.length === 0) || (arMode === 'seam' && recentSeams.length === 0) || (arMode === 'repair' && recentRepairs.length === 0)) && (
-                <div className="empty-box">Save some {arMode} records first so the overlay list has real field data.</div>
-              )}
-            </div>
-          </section>
-        )}
-
-        {screen === 'module' && (
-          <section className="panel">
-            <button className="back" onClick={() => setScreen('chooser')}>← BACK</button>
-            <div className="project-head">
-              <div>
-                <h2 className="section-title">{cfg.title}</h2>
-                <p className="subtitle">{project.name || 'No project open'}</p>
-              </div>
-              <div className="pill">{activeRows.length} saved</div>
-            </div>
-
-            <div className="stack">
-              <button className="btn big primary" onClick={startNewRecord}>{cfg.action}</button>
-
-              {activeModule === 'panels' && (
-                <div className="voiceBox">
-                  <strong>Smart panel logic</strong>
-                  <div>Tap or voice for GPS start and stop. Say: start panel, stop panel, panel E-12, east slope, north south, width 23, save panel.</div>
-                  <div className="heardLine"><span className="mutedLabel">Heard:</span> {heard}</div>
-                  <div className="grid-two">
-                    <button className="btn" onClick={captureStart}>START GPS</button>
-                    <button className="btn" onClick={captureEnd}>END GPS</button>
-                  </div>
-                  <button className="btn" onClick={runVoice}>KEYWORD VOICE FILL</button>
-                  <button className="btn" onClick={() => setScreen('ar')}>OPEN AR VIEW</button>
-                </div>
-              )}
-
-              <div className="form-stack">
-                {cfg.fields.map((field) => (
-                  <label className="field" key={field}>
-                    <span>{field}</span>
-                    {field === 'Comments' || field === 'Notes' ? (
-                      <textarea value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)} placeholder={field} />
-                    ) : field === 'Type' && activeModule === 'repairs' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="Patch">Patch</option>
-                        <option value="Bead">Bead</option>
-                      </select>
-                    ) : field === 'Status' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="Open">Open</option>
-                        <option value="Accepted">Accepted</option>
-                        <option value="Rejected">Rejected</option>
-                        <option value="Available">Available</option>
-                      </select>
-                    ) : field === 'Zone' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="East Slope">East Slope</option>
-                        <option value="West Slope">West Slope</option>
-                        <option value="North Slope">North Slope</option>
-                        <option value="South Slope">South Slope</option>
-                        <option value="Floor">Floor</option>
-                      </select>
-                    ) : field === 'Orientation' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="N-S">N-S</option>
-                        <option value="E-W">E-W</option>
-                      </select>
-                    ) : field === 'Offset Side' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="Right">Right</option>
-                        <option value="Left">Left</option>
-                        <option value="Centered">Centered</option>
-                      </select>
-                    ) : field === 'Weld Type' ? (
-                      <select value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)}>
-                        <option value="Fusion">Fusion</option>
-                        <option value="Extrusion">Extrusion</option>
-                      </select>
-                    ) : (
-                      <input value={recordDraft[field] || ''} onChange={(e) => fieldInput(field, e.target.value)} placeholder={field} />
-                    )}
-                  </label>
-                ))}
-                <div className="grid-two">
-                  <button className="btn primary" onClick={saveRecord}>{editingId ? 'UPDATE RECORD' : 'SAVE RECORD'}</button>
-                  <button className="btn" onClick={() => { setEditingId(null); setRecordDraft({}); setHeard('Nothing yet') }}>CLEAR FORM</button>
-                </div>
-              </div>
-
-              <div className="list">
-                {activeRows.length === 0 && <div className="empty-box">No records yet in this module.</div>}
-                {activeRows.map((row) => (
-                  <button className="record-card" key={row.id} onClick={() => { setDetailId(row.id || null); setScreen('detail') }}>
-                    <strong>{row[cfg.firstField] || cfg.title}</strong>
-                    <div className="record-meta">
-                      {cfg.visible.slice(1).map((field) => (
-                        <span key={field}>{field}: {row[field] || '—'}</span>
-                      ))}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {screen === 'detail' && detailRecord && (
-          <section className="panel">
-            <button className="back" onClick={() => setScreen('module')}>← BACK</button>
-            <h2 className="section-title">{cfg.title} DETAIL</h2>
-            <div className="form-stack">
-              {Object.entries(detailRecord).filter(([key]) => key !== 'id').map(([key, value]) => (
-                <div className="detail-box" key={key}>
-                  <strong>{key}</strong>
-                  <div>{value || '—'}</div>
-                </div>
-              ))}
-            </div>
-            <div className="grid-two" style={{ marginTop: 12 }}>
-              <button className="btn" onClick={() => { openEdit(detailRecord); setScreen('module') }}>EDIT</button>
-              <button className="btn danger" onClick={() => deleteRecord(detailRecord.id || '')}>DELETE</button>
+              <strong>Current truth</strong>
+              <div>QC forms are active now. True camera AR anchoring comes after logs, export, and as-built data are stable.</div>
             </div>
           </section>
         )}
@@ -585,14 +517,10 @@ export default function App() {
       {helpOpen && (
         <div className="modal-wrap" onClick={() => setHelpOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>HELP</h3>
+            <h3>Chunk 5D Help</h3>
             <div className="detail-box">
-              <strong>Chunk 5 scope</strong>
-              AR camera placeholder screen, saved panel overlay guides, seam overlay guides, repair marker mode, and open-AR workflow.
-            </div>
-            <div className="detail-box">
-              <strong>Truth status</strong>
-              This is AR foundation only. It is not true device camera AR anchoring yet.
+              <strong>What changed</strong>
+              <div>All locked QC forms now open from TAP TO CAPTURE QC FORM, save records, validate required fields, and remember repeated values.</div>
             </div>
             <button className="btn primary" onClick={() => setHelpOpen(false)}>CLOSE</button>
           </div>
