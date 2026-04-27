@@ -1,10 +1,10 @@
 // =====================================================
 // LINERSYNC SUPER APP
-// CHUNK 5C — QC FORM REGISTRY
+// CHUNK 5C / 5E — QC FORM REGISTRY
 // =====================================================
 // Purpose:
 // One locked list of every active QC form and every visible field.
-// The app UI should render forms from this registry so fields do not get lost.
+// The app UI renders forms from this registry so fields do not get lost.
 
 import {
   RECORD_TYPES,
@@ -90,7 +90,7 @@ export const ROLL_INVENTORY_FORM: QCFormDefinition = {
     { key: 'surfaceTypeValue', label: 'Surface Type', type: 'select', autoFill: true, options: SURFACE_TYPE_OPTIONS },
     { key: 'rollWidth', label: 'Roll Width', type: 'number', autoFill: true },
     { key: 'rollLength', label: 'Roll Length', type: 'number' },
-    { key: 'rollSquareFootage', label: 'Roll Square Footage', type: 'number', readonly: true as any },
+    { key: 'rollSquareFootage', label: 'Roll Square Footage', type: 'readonly' },
     { key: 'deliveryDate', label: 'Delivery Date', type: 'date' },
     { key: 'rollStatus', label: 'Roll Status', type: 'select', required: true, options: ROLL_STATUS_OPTIONS },
     { key: 'rollTagPhoto', label: 'Roll Tag Photo', type: 'photo' },
